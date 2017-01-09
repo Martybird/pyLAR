@@ -16,6 +16,8 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+# modified by Yiming Xiao, PERFORM Centre, Concordia Univeristy, 2016
+# This software strictly deals with 2D cases using ANTs
 
 """ Unbiased low-rank atlas creation from a selection of images
 
@@ -84,15 +86,8 @@ def _runIteration(vector_length, level, currentIter, config, im_fns, sigma, grid
     registration_type = config.registration_type
     lamda = config.lamda
     listOutputImages = []
-    if registration_type == 'BSpline' or registration_type == 'Demons':
-        EXE_BRAINSResample = software.EXE_BRAINSResample
-        EXE_InvertDeformationField = software.EXE_InvertDeformationField
-        if registration_type == 'BSpline':
-            EXE_BRAINSFit = software.EXE_BRAINSFit
-            EXE_BSplineToDeformationField = software.EXE_BSplineToDeformationField
-        elif registration_type == 'Demons':
-            EXE_BRAINSDemonWarp = software.EXE_BRAINSDemonWarp
-    elif registration_type == 'ANTS':
+
+    if registration_type == 'ANTS':
         EXE_antsRegistration = software.EXE_antsRegistration
         EXE_WarpImageMultiTransform = software.EXE_WarpImageMultiTransform
         ants_params = config.ants_params
@@ -104,11 +99,14 @@ def _runIteration(vector_length, level, currentIter, config, im_fns, sigma, grid
     current_path_iter = iter_path + str(currentIter)
     prev_path_iter = iter_path + str(currentIter-1)
     for i in range(num_of_data):
-        im_file = prev_path_iter + '_' + str(i) + '.nrrd'
+        im_file = prev_path_iter + '_' + str(i) + '.nii.gz'
         inIm = sitk.ReadImage(im_file)
         tmp = sitk.GetArrayFromImage(inIm)
+        print im_file
+
         if sigma > 0:  # blurring
             log.info("Blurring: " + str(sigma))
+            #outIm = pyLAR.GaussianBlur(inIm, None, sigma) # Guassian blurring SmoothingRecursiveGaussianImageFilter, supposed to be OK for 2D
             outIm = pyLAR.GaussianBlur(im_file, None, sigma)
             tmp = sitk.GetArrayFromImage(outIm)
         Y[:, i] = tmp.reshape(-1)
@@ -116,17 +114,17 @@ def _runIteration(vector_length, level, currentIter, config, im_fns, sigma, grid
 
     # Low-rank and sparse decomposition
     low_rank, sparse, n_iter, rank, sparsity, sum_sparse = pyLAR.rpca(Y, lamda)
-    lr = pyLAR.saveImagesFromDM(low_rank, current_path_iter + '_LowRank_', reference_im_fn)
-    sp = pyLAR.saveImagesFromDM(sparse, current_path_iter + '_Sparse_', reference_im_fn)
+    lr = pyLAR.saveImagesFromDM2D(low_rank, current_path_iter + '_LowRank_', reference_im_fn)
+    sp = pyLAR.saveImagesFromDM2D(sparse, current_path_iter + '_Sparse_', reference_im_fn)
     listOutputImages = lr + sp
     # Visualize and inspect
     try:
         import matplotlib.pyplot as plt
         fig = plt.figure(figsize=(15, 5))
         slice_prefix = 'L' + str(level) + '_' + str(currentIter)
-        pyLAR.showSlice(Y, slice_prefix + ' Input', plt.cm.gray, 0, reference_im_fn)
-        pyLAR.showSlice(low_rank, slice_prefix + ' low rank', plt.cm.gray, 1, reference_im_fn)
-        pyLAR.showSlice(np.abs(sparse), slice_prefix + ' sparse', plt.cm.gray, 2, reference_im_fn)
+        pyLAR.showSlice2D(Y, slice_prefix + ' Input', plt.cm.gray, 0, reference_im_fn)
+        pyLAR.showSlice2D(low_rank, slice_prefix + ' low rank', plt.cm.gray, 1, reference_im_fn)
+        pyLAR.showSlice2D(np.abs(sparse), slice_prefix + ' sparse', plt.cm.gray, 2, reference_im_fn)
         plt.savefig(current_path_iter + '.png')
         fig.clf()
         plt.close(fig)
@@ -139,22 +137,22 @@ def _runIteration(vector_length, level, currentIter, config, im_fns, sigma, grid
     if not use_healthy_atlas:
         EXE_AverageImages = software.EXE_AverageImages
         # Average the low-rank images to produce the Atlas
-        atlasIm = current_path_iter + '_atlas.nrrd'
+        atlasIm = current_path_iter + '_atlas.nii.gz'
         listOfImages = []
         num_of_data = len(selection)
         for i in range(num_of_data):
-            lrIm = current_path_iter + '_LowRank_' + str(i) + '.nrrd'
+            lrIm = current_path_iter + '_LowRank_' + str(i) + '.nii.gz'
             listOfImages.append(lrIm)
-        pyLAR.AverageImages(EXE_AverageImages, listOfImages, atlasIm)
+        pyLAR.AverageImages2D(EXE_AverageImages, listOfImages, atlasIm)
 
         im = sitk.ReadImage(atlasIm)
         im_array = sitk.GetArrayFromImage(im)
-        z_dim, x_dim, y_dim = im_array.shape
+        x_dim, y_dim = im_array.shape
         try:
             import matplotlib.pyplot as plt
             plt.figure()
     # need to deal with dimension issues
-            implot = plt.imshow(np.flipud(im_array[z_dim / 2, :, :]), plt.cm.gray)
+            implot = plt.imshow(np.flipud(im_array), plt.cm.gray)
             plt.title(iter_prefix + str(currentIter) + ' atlas')
             plt.savefig(current_path_iter + '.png')
         except ImportError:
@@ -162,51 +160,36 @@ def _runIteration(vector_length, level, currentIter, config, im_fns, sigma, grid
         reference_im_fn = atlasIm
     listOutputImages += [reference_im_fn]
 
-    # this is the part that might need to be parallized
+    # this is the part that might need to be parallized - Xiao
     for i in range(num_of_data):
         # Warps the low-rank image back to the initial state (the non-greedy way)
         invWarpedlowRankIm = ''
         if currentIter == 1:
-            invWarpedlowRankIm = current_path_iter + '_LowRank_' + str(i) + '.nrrd'
+            invWarpedlowRankIm = current_path_iter + '_LowRank_' + str(i) + '.nii.gz'
         else:
-            lowRankIm = current_path_iter + '_LowRank_' + str(i) + '.nrrd'
-            invWarpedlowRankIm = current_path_iter + '_InvWarped_LowRank_' + str(i) + '.nrrd'
-            if registration_type == 'BSpline' or registration_type == 'Demons':
-                previousIterDVF = prev_path_iter + '_DVF_' + str(i) + '.nrrd'
-                inverseDVF = prev_path_iter + '_INV_DVF_' + str(i) + '.nrrd'
-                pyLAR.genInverseDVF(EXE_InvertDeformationField, previousIterDVF, inverseDVF, True)
-                pyLAR.updateInputImageWithDVF(EXE_BRAINSResample, lowRankIm, reference_im_fn,
-                                              inverseDVF, invWarpedlowRankIm, True)
+            lowRankIm = current_path_iter + '_LowRank_' + str(i) + '.nii.gz'
+            invWarpedlowRankIm = current_path_iter + '_InvWarped_LowRank_' + str(i) + '.nii.gz'
+
             if registration_type == 'ANTS':
                 previousIterTransformPrefix = prev_path_iter + '_' + str(i) + '_'
-                pyLAR.ANTSWarpImage(EXE_WarpImageMultiTransform, lowRankIm, invWarpedlowRankIm, reference_im_fn,
+                pyLAR.ANTSWarp2DImage(EXE_WarpImageMultiTransform, lowRankIm, invWarpedlowRankIm, reference_im_fn,
                                     previousIterTransformPrefix, True, True)
 
         # Registers each inversely-warped low-rank image to the Atlas image
-        outputIm = current_path_iter + '_Deformed_LowRank' + str(i) + '.nrrd'
+        outputIm = current_path_iter + '_Deformed_LowRank' + str(i) + '.nii.gz'
         # .tfm for BSpline only
-        outputTransform = current_path_iter + '_Transform_' + str(i) + '.tfm'
-        outputDVF = current_path_iter + '_DVF_' + str(i) + '.nrrd'
+        #outputTransform = current_path_iter + '_Transform_' + str(i) + '.tfm'
+        #outputDVF = current_path_iter + '_DVF_' + str(i) + '.nii.gz'
 
         movingIm = invWarpedlowRankIm
         fixedIm = reference_im_fn
 
         initial_prefix = 'L' + str(level) + '_Iter0_'
-        initialInputImage = os.path.join(result_dir, initial_prefix + str(i) + '.nrrd')
-        newInputImage = current_path_iter + '_' + str(i) + '.nrrd'
+        initialInputImage = os.path.join(result_dir, initial_prefix + str(i) + '.nii.gz')
+        newInputImage = current_path_iter + '_' + str(i) + '.nii.gz'
 
-        if registration_type == 'BSpline':
-            pyLAR.BSplineReg_BRAINSFit(EXE_BRAINSFit, fixedIm, movingIm, outputIm, outputTransform,
-                                              gridSize, maxDisp, EXECUTE=True)
-            pyLAR.ConvertTransform(EXE_BSplineToDeformationField, reference_im_fn,
-                                                outputTransform, outputDVF, EXECUTE=True)
-            pyLAR.updateInputImageWithDVF(EXE_BRAINSResample, initialInputImage, reference_im_fn,
-                                                       outputDVF, newInputImage, EXECUTE=True)
-        elif registration_type == 'Demons':
-            pyLAR.DemonsReg(EXE_BRAINSDemonWarp, fixedIm, movingIm, outputIm, outputDVF, EXECUTE=True)
-            pyLAR.updateInputImageWithDVF(EXE_BRAINSResample, initialInputImage, reference_im_fn,
-                                                       outputDVF, newInputImage, EXECUTE=True)
-        elif registration_type == 'ANTS':
+
+        if registration_type == 'ANTS':
             # Generates a warp(DVF) file and an affine file
             outputTransformPrefix = current_path_iter + '_' + str(i) + '_'
             # if currentIter > 1:
@@ -214,7 +197,7 @@ def _runIteration(vector_length, level, currentIter, config, im_fns, sigma, grid
             # else:
             pyLAR.ANTS(EXE_antsRegistration, fixedIm, movingIm, outputTransformPrefix, ants_params, EXECUTE=True)
             # Generates the warped input image with the specified file name
-            pyLAR.ANTSWarpImage(EXE_WarpImageMultiTransform, initialInputImage, newInputImage,
+            pyLAR.ANTSWarp2DImage(EXE_WarpImageMultiTransform, initialInputImage, newInputImage,
                                              reference_im_fn, outputTransformPrefix, EXECUTE=True)
         else:
             raise('Unrecognized registration type:', registration_type)
@@ -238,23 +221,24 @@ def run(config, software, im_fns, check=True):
     num_of_levels = config.num_of_levels  # Multi-scale blurring (coarse-to-fine)
     registration_type = config.registration_type
     gridSize = [0, 0, 0]
-    if registration_type == 'BSpline':
-        gridSize = config.gridSize
+
+#    if registration_type == 'BSpline':
+#        gridSize = config.gridSize
 
     s = time.time()
     #pyLAR.showImageMidSlice(reference_im_fn)
-    pyLAR.affineRegistrationStep(software.EXE_BRAINSFit, im_fns, result_dir,
-                                 selection, reference_im_fn)
+    # going to skip this affine reg part, the input images are registered already
+    pyLAR.initializeStep(im_fns, result_dir, selection, reference_im_fn)
     # pyLAR.histogramMatchingStep()
 
     im_ref = sitk.ReadImage(reference_im_fn)
     im_ref_array = sitk.GetArrayFromImage(im_ref)
-    z_dim, x_dim, y_dim = im_ref_array.shape
-    vector_length = z_dim * x_dim * y_dim
+    x_dim, y_dim = im_ref_array.shape
+    vector_length = x_dim * y_dim
     del im_ref, im_ref_array
 
     num_of_data = len(selection)
-    factor = 0.5  # BSpline max displacement constrain, 0.5 refers to half of the grid size
+    #factor = 0.5  # BSpline max displacement constrain, 0.5 refers to half of the grid size
     iterCount = 0
     for level in range(0, num_of_levels):
         for iterCount in range(1, num_of_iterations_per_level + 1):
@@ -263,43 +247,40 @@ def run(config, software, im_fns, check=True):
             log.info('Iteration ' + str(iterCount) + ' lamda = %f' % lamda)
             log.info('Blurring Sigma: ' + str(sigma))
 
-            if registration_type == 'BSpline':
-                log.info('Grid size: ' + str(gridSize))
-                maxDisp = z_dim / gridSize[2] * factor
+            #if registration_type == 'BSpline':
+                #log.info('Grid size: ' + str(gridSize))
+                #maxDisp = z_dim / gridSize[2] * factor
 
             _, _, listOutputImages = _runIteration(vector_length, level, iterCount, config, im_fns,
                           sigma, gridSize, maxDisp, software)
 
             # Adjust grid size for finner BSpline Registration
-            if registration_type == 'BSpline' and gridSize[0] < 10:
-                gridSize = np.add(gridSize, [1, 2, 1])
+            #if registration_type == 'BSpline' and gridSize[0] < 10:
+                #gridSize = np.add(gridSize, [1, 2, 1])
 
             # Reduce the amount of  blurring sizes gradually
             #if sigma > 0:
             #    sigma = sigma - 0.5
-
+                #sigma = sigma * 0.5
             gc.collect()  # Garbage collection
 
         if level != num_of_levels - 1:
             log.warning('No need for multiple levels! TO BE REMOVED!')
             for i in range(num_of_data):
-                current_file_name = 'L' + str(level) + '_Iter' + str(iterCount) + '_' + str(i) + '.nrrd'
+                current_file_name = 'L' + str(level) + '_Iter' + str(iterCount) + '_' + str(i) + '.nii.gz'
                 current_file_path = os.path.join(result_dir, current_file_name)
-                nextLevelInitIm = os.path.join(result_dir, 'L' + str(level + 1) + '_Iter0_' + str(i) + '.nrrd')
+                nextLevelInitIm = os.path.join(result_dir, 'L' + str(level + 1) + '_Iter0_' + str(i) + '.nii.gz')
                 shutil.copyfile(current_file_path, nextLevelInitIm)
 
-            if gridSize[0] < 10:
-                gridSize = np.add(gridSize, [1, 2, 1])
-            #if sigma > 0:
-            #    sigma = sigma - 1
-
-            factor = factor * 0.5
+            #if gridSize[0] < 10:
+                #gridSize = np.add(gridSize, [1, 2, 1])
         if level < num_of_levels - 1:
             if sigma > 0:
                 sigma = sigma * 0.5 # this should be scaled with respect to levels
             #factor = factor * 0.5
         else:
             sigma = 0
+
             # a = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
             # print 'Current memory usage :',a/1024.0/1024.0,'GB'
             # h = hpy()
@@ -324,14 +305,11 @@ def check_requirements(config, software, configFileName=None, softwareFileName=N
     required_software = ['EXE_BRAINSFit']
     if not config.use_healthy_atlas:
         required_software.append('EXE_AverageImages')
-    if registration_type == 'BSpline':
-        required_software.extend(['EXE_InvertDeformationField', 'EXE_BRAINSResample', 'EXE_BSplineToDeformationField'])
-        pyLAR.containsRequirements(config, ['gridSize'], configFileName)
-    elif registration_type == 'Demons':
-        required_software.extend(['EXE_BRAINSDemonWarp', 'EXE_BRAINSResample','EXE_InvertDeformationField'])
-    elif registration_type == 'ANTS':
+    # only cares about ANTS
+    if registration_type == 'ANTS':
         required_software.extend(['EXE_antsRegistration', 'EXE_WarpImageMultiTransform'])
         pyLAR.containsRequirements(config, ['ants_params'], configFileName)
+
     if not config.num_of_iterations_per_level >= 0:
         raise Exception('Error in configuration file: "num_of_iterations_per_level"\
          must be a positive integer (>=0).')
